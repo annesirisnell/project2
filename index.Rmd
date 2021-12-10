@@ -46,93 +46,223 @@ class_diag <- function(score, truth, positive, cutoff=.5){
 
 # Mining, Classification, Prediction
 
-## Name and EID here
+## Anne Siri Snell, as223795
 
 ### Introduction 
 
-Paragraph or two introducing your datasets and variables, why they are interesting to you, etc. See instructions for more information
+My data is from the FiveThirtyEight data package already built into R. The specific dataset i the 'hatecrimes' dataset, which contains data on the number of hate crimes on the state level along with id variable for the state and 9 different demographic variables. The variables of my interest are number of hate crimes, income, share of non-white population, share of population living in metropolitan areas and a binary variable I've created that indicated whether or not the state is above or below the mean share of adult population with a high school degree.
+
+Income is measured as annual median household income in 2016, share of non-white population is share of the population that is not white in 2015 and ranges from 0-1, number of hate crimes is measured as per 100,000 population in 2016, share of the population that lives in metropolitan areas is measured in 2015 and ranges from 0-1. These are all numeric variables. 
+
+My binary variable 'highschool' is given a 0 if the state have a share of population with a high school degree below the mean and 1 if the state have a population with a high school degree above the mean. 
+
+There are 765 observations in my dataset and for the binary variable i have 23 observations below the mean of share of population with a high school degree and 28 observations above the mean. 
 
 ```{R}
+#Load packages 
 library(tidyverse)
-# read your datasets in here, e.g., with read_csv()
+library(fivethirtyeight)
+library(cluster)
+library(dplyr)
+library(ggplot2)
 
-# if your dataset needs tidying, do so here
+#Show dataframe
+print(hate_crimes)
 
-# any other code here
+#Count number of observations
+length(as.matrix(hate_crimes))
+
+#Create new binary varible "highschool"
+mean(hate_crimes$share_pop_hs)
+hate_crimes$highschool <- ifelse(hate_crimes$share_pop_hs>0.8691176,1,0)
+
+#Show number of observations in each category of 'highschool'
+table(hate_crimes$highschool)
 ```
 
 ### Cluster Analysis
 
 ```{R}
-library(cluster)
-# clustering code here
+#Choosing number of clusters
+pam_dat <- hate_crimes %>% select(median_house_inc, share_non_white, share_pop_metro)
+sil_width<-vector()
+for(i in 2:10){  
+  pam_fit <- pam(pam_dat, k = i)  
+  sil_width[i] <- pam_fit$silinfo$avg.width  
+}
+ggplot()+geom_line(aes(x=1:10,y=sil_width))+scale_x_continuous(name="k",breaks=1:10)
+```
+From the above plot I suggest to choose three clusters. 
+
+```{r}
+#Running cluster analysis 
+pam1 <- pam_dat %>% pam(k=3) #use the pam function
+pam1
+```
+```{r}
+#Saving clusters to dataframe
+hate_crimes <- hate_crimes %>% mutate(cluster=as.factor(pam1$clustering))
+
+#Visualizing clusters
+library(GGally)
+ggpairs(hate_crimes, columns = c("median_house_inc", "share_non_white", "share_pop_metro"), aes(color=cluster))
+```
+```{r}
+#Calculating average silhouette width
+pam1$silinfo$avg.width
 ```
 
-Discussion of clustering here
-    
+As the average silhouette width is between 0.51−0.70 a reasonable structure have been found. 
     
 ### Dimensionality Reduction with PCA
 
 ```{R}
-# PCA code here
+#PCA
+hate_crimes_nums<-hate_crimes %>% select(median_house_inc, share_non_white, share_pop_metro) %>% scale
+hate_crimes_pca<-princomp(hate_crimes_nums)
+summary(hate_crimes_pca, loadings=T)
+
+eigval<-hate_crimes_pca$sdev^2
+varprop=round(eigval/sum(eigval), 2)
+round(cumsum(eigval)/sum(eigval), 2) #cumulative proportion of variance
+eigval #eigenvalues
+
+ggplot() + geom_bar(aes(y=varprop, x=1:3), stat="identity") + xlab("") + geom_path(aes(y=varprop, x=1:3)) + 
+  geom_text(aes(x=1:3, y=varprop, label=round(varprop, 2)), vjust=1, col="white", size=5) + 
+  scale_y_continuous(breaks=seq(0, .6, .2), labels = scales::percent) + 
+  scale_x_continuous(breaks=1:10)
+
 ```
 
-Discussions of PCA here. 
+There are several rules of thumb to chose the right number of PCs. One is to look at when the scree plot flattens, but it isn't really clear from my plot when it flattens. Another startegy is to pick the number of PCs until cumulative proportion of variance is >80%. This would make me chose 2 PCs. A third rule is to pick PCs whose eigenvalues are greater than 1 (Kaiser's rule). This rule woudl make me choose only the first PC. All combined I choose PC1 and PC2, which explains 86 % of the variance in my data. PC1 shows positive and relatively high loadings on both income, share of non-white population and share of population in metropolitan areas. This means that the higher score on PC1, the higher overall score on the included variables. PC2 shows that higher scores on PC2 mean high median household income but low score on share of non-white population. 
 
 ###  Linear Classifier
 
 ```{R}
-# linear classifier code here
+#Replacing NAs with 0
+hate_crimes[is.na(hate_crimes)] <- 0
+
+#Logistic regression as linear classifier
+fit <- glm(highschool ~ median_house_inc + share_non_white + share_pop_metro + hate_crimes_per_100k_splc, data=hate_crimes, family="binomial")
+
+score <- predict(fit, type="response")
+
+class_diag(score,truth=hate_crimes$highschool,positive=1)
+
 ```
+With an AUC of 0.96 the model is doing great!
 
 ```{R}
-# cross-validation of linear classifier here
+#Cross validation 
+
+k=5
+data <- hate_crimes[sample(nrow(hate_crimes)),] #randomly order rows
+folds<-cut(seq(1:nrow(data)),breaks=k,labels=F) #create folds
+diags<-NULL
+for(i in 1:k){
+  ## Create training and test sets
+  train<-data[folds!=i,] 
+  test<-data[folds==i,]
+  truth<-test$highschool
+  ## Train model on training set
+  fit<-glm(highschool ~ median_house_inc + share_non_white + share_pop_metro + hate_crimes_per_100k_splc, data=train, family="binomial")
+  probs<-predict(fit,newdata = test,type="response")
+  ## Test model on test set (save all k results)
+  diags<-rbind(diags,class_diag(probs,truth, positive=1))
+}
+
+summarize_all(diags,mean)
 ```
 
-Discussion here
+The AUC in the CV is 0.80, which is a significant drop. This means that the model does more poorly in the CV and could be a sign of overfitting.
 
 ### Non-Parametric Classifier
 
 ```{R}
+#Fit of non-parametric classifier - k-nearest neighbors
+
 library(caret)
-# non-parametric classifier code here
+knn_fit <- knn3(factor(highschool==1,levels=c("TRUE","FALSE")) ~ median_house_inc + share_non_white + share_pop_metro + hate_crimes_per_100k_splc, data=hate_crimes, k=5)
+y_hat_knn <- predict(knn_fit,hate_crimes)
+
+table(truth= factor(hate_crimes$highschool==1, levels=c("TRUE","FALSE")),
+      prediction= factor(y_hat_knn[,1]>.5, levels=c("TRUE","FALSE")))
+
+class_diag(y_hat_knn[,1],hate_crimes$highschool, positive=1)
 ```
+
+With an AUC of 0.91 the model is doing great!
+
 
 ```{R}
-# cross-validation of np classifier here
+#Cross validation
+
+k=5 #choose number of folds
+data<-hate_crimes[sample(nrow(hate_crimes)),] #randomly order rows
+folds<-cut(seq(1:nrow(hate_crimes)),breaks=k,labels=F) #create 10 folds
+diags<-NULL
+for(i in 1:k){
+  ## Create training and test sets
+  train<-data[folds!=i,] 
+  test<-data[folds==i,]
+  truth<-test$highschool
+  ## Train model on training set
+  fit<-knn3(highschool ~ median_house_inc + share_non_white + share_pop_metro + hate_crimes_per_100k_splc,data=train)
+  probs<-predict(fit,newdata = test)[,2]
+  ## Test model on test set
+  diags<-rbind(diags,class_diag(probs,truth, positive=1))
+}
+
+summarize_all(diags,mean)
 ```
 
-Discussion
+The AUC in the CV is 0.87, which means that the model does more poorly in CV. This could be a sign of overfitting.
 
 
 ### Regression/Numeric Prediction
 
 ```{R}
-# regression model code here
+#Fit of linear regression model
+fit<-lm(mpg~.,data=mtcars) #predict mpg from all other variables
+yhat<-predict(fit) #predicted mpg
+
+mean((mtcars$mpg-yhat)^2) #mean squared error (MSE)
 ```
+
+A MSE of 4.6 is pretty low, but we wan't to compare it to the MSE in the cross validation. 
 
 ```{R}
-# cross-validation of regression model here
+#Cross validation
+
+k=5 #choose number of folds
+data<-hate_crimes[sample(nrow(hate_crimes)),] #randomly order rows
+folds<-cut(seq(1:nrow(hate_crimes)),breaks=k,labels=F) #create folds
+diags<-NULL
+for(i in 1:k){
+  train<-data[folds!=i,]
+  test<-data[folds==i,]
+  ## Fit linear regression model to training set
+  fit<-lm(highschool ~ median_house_inc + share_non_white + share_pop_metro + hate_crimes_per_100k_splc,data=train)
+  ## Get predictions/y-hats on test set (fold i)
+  yhat<-predict(fit,newdata=test)
+  ## Compute prediction error  (MSE) for fold i
+  diags<-mean((test$highschool-yhat)^2) 
+}
+mean(diags) ## Get average MSE across all folds
 ```
 
-Discussion
+The Mean Square Error is lower in the CV, which means that the model is predicting good on new data. The model doesn't show signs of overfitting, which also makes sense given that only four predictors are included. 
 
 ### Python 
 
 ```{R}
 library(reticulate)
+
+monthly_income <- hate_crimes$median_house_inc/12
 ```
 
 ```{python}
-# python code here
+print(r.monthly_income)
 ```
 
-Discussion
-
-### Concluding Remarks
-
-Include concluding remarks here, if any
-
-
-
-
+For the sharing of objects between R and Python, I created a new variable in an R chunck that gives the median monthly house income in every state and then I used an Python chunck to print out the values of the new variable.
